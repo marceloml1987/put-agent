@@ -155,62 +155,163 @@ const MOCK_HISTORY = {
   ],
 };
 
+// ── Black-Scholes ─────────────────────────────────────────────────────────
+function erf(x) {
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+  const sign = x < 0 ? -1 : 1; x = Math.abs(x);
+  const t = 1 / (1 + p * x);
+  const y = 1 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+  return sign * y;
+}
+function normCDF(x) { return 0.5 * (1 + erf(x / Math.sqrt(2))); }
+function normPDF(x) { return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI); }
+
+function blackScholes(S, K, T, r, sigma, type) {
+  if (S <= 0 || K <= 0) throw new Error("Invalid inputs");
+  if (T <= 0) {
+    var intrinsic = type === "PUT"
+      ? Math.max(K - S, 0)
+      : Math.max(S - K, 0);
+
+    return { price: intrinsic, delta: 0, gamma: 0, theta: 0, vega: 0 };
+  }
+  const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
+  const d2 = d1 - sigma * Math.sqrt(T);
+  const isPut = type === "PUT";
+  const nd1 = normPDF(d1);
+  const price = isPut
+    ? K * Math.exp(-r * T) * normCDF(-d2) - S * normCDF(-d1)
+    : S * normCDF(d1) - K * Math.exp(-r * T) * normCDF(d2);
+  const delta = isPut ? -normCDF(-d1) : normCDF(d1);
+  const gamma = nd1 / (S * sigma * Math.sqrt(T));
+  const theta = isPut
+    ? (-(S * nd1 * sigma) / (2 * Math.sqrt(T)) + r * K * Math.exp(-r * T) * normCDF(-d2)) / 252
+    : (-(S * nd1 * sigma) / (2 * Math.sqrt(T)) - r * K * Math.exp(-r * T) * normCDF(d2)) / 252;
+  const vega = S * nd1 * Math.sqrt(T) / 100;
+  return { price, delta, gamma, theta, vega };
+}
+
+function impliedVolatility(S, K, T, r, marketPrice, type) {
+  var tol = 1e-5;
+  var maxIter = 100;
+
+  var low = 0.0001;
+  var high = 3; // 300% de vol (limite alto)
+
+  for (var i = 0; i < maxIter; i++) {
+    var mid = (low + high) / 2;
+
+    var price = blackScholes(S, K, T, r, mid, type).price;
+
+    if (Math.abs(price - marketPrice) < tol) {
+      return mid;
+    }
+
+    if (price > marketPrice) {
+      high = mid;
+    } else {
+      low = mid;
+    }
+  }
+
+  return (low + high) / 2;
+}
+
+function calcPercentile(prices, strike) {
+  const sorted = [...prices].sort((a, b) => a - b);
+  return (sorted.filter(p => p <= strike).length / sorted.length) * 100;
+}
+
+// ── Technical indicators ──────────────────────────────────────────────────
 function calcSMA(data, period) {
   return data.map((_, i) => {
     if (i < period - 1) return null;
-    const slice = data.slice(i - period + 1, i + 1);
-    return slice.reduce((s, d) => s + d.close, 0) / period;
+    return data.slice(i - period + 1, i + 1).reduce((s, d) => s + d.close, 0) / period;
   });
 }
-
 function calcRSI(data, period = 14) {
   if (data.length < period + 1) return Array(data.length).fill(null);
-  const changes = data.map((d, i) => (i === 0 ? 0 : d.close - data[i - 1].close));
+  const changes = data.map((d, i) => i === 0 ? 0 : d.close - data[i - 1].close);
   return data.map((_, i) => {
     if (i < period) return null;
     const slice = changes.slice(i - period + 1, i + 1);
     const gains = slice.filter(c => c > 0).reduce((s, c) => s + c, 0) / period;
     const losses = Math.abs(slice.filter(c => c < 0).reduce((s, c) => s + c, 0)) / period;
     if (losses === 0) return 100;
-    const rs = gains / losses;
-    return 100 - 100 / (1 + rs);
+    return 100 - 100 / (1 + gains / losses);
   });
 }
 
 function calcVolatility(data) {
-  if (data.length < 2) return 0;
-  const returns = data.slice(1).map((d, i) => Math.log(d.close / data[i].close));
-  const mean = returns.reduce((s, r) => s + r, 0) / returns.length;
-  const variance = returns.reduce((s, r) => s + Math.pow(r - mean, 2), 0) / returns.length;
-  return Math.sqrt(variance * 252) * 100;
+  if (!data || data.length < 2) return 0;
+
+  var returns = [];
+
+  for (var i = 1; i < data.length; i++) {
+    var prev = data[i - 1].close;
+    var curr = data[i].close;
+
+    if (prev > 0 && curr > 0) {
+      returns.push(Math.log(curr / prev));
+    }
+  }
+
+  var n = returns.length;
+  if (n < 2) return 0;
+
+  var mean = returns.reduce(function (s, r) { return s + r; }, 0) / n;
+
+  var variance = returns.reduce(function (s, r) {
+    return s + Math.pow(r - mean, 2);
+  }, 0) / (n - 1); // 👈 ajuste aqui
+
+  return Math.sqrt(variance * 252);
 }
 
-function MiniChart({ data, sma20, sma50, width = 340, height = 120 }) {
+// ── Mini Chart ────────────────────────────────────────────────────────────
+function MiniChart({ data, sma20, sma50, strikeLevel, width = 340, height = 120 }) {
   if (!data || data.length === 0) return null;
   const prices = data.map(d => d.close);
-  const min = Math.min(...prices) * 0.995;
-  const max = Math.max(...prices) * 1.005;
-  const px = (i) => (i / (data.length - 1)) * width;
-  const py = (v) => height - ((v - min) / (max - min)) * height;
-  const line = (arr) => arr.map((v, i) => v !== null ? `${i === 0 || arr[i - 1] === null ? 'M' : 'L'}${px(i)},${py(v)}` : '').join(' ');
+  const allVals = strikeLevel ? [...prices, strikeLevel] : prices;
+  const min = Math.min(...allVals) * 0.993;
+  const max = Math.max(...allVals) * 1.007;
+  const px = i => (i / (data.length - 1)) * width;
+  const py = v => height - ((v - min) / (max - min)) * height;
+  const line = arr => arr.map((v, i) => v !== null ? `${i === 0 || arr[i - 1] === null ? 'M' : 'L'}${px(i)},${py(v)}` : ``).join(' ');
   const areaPath = `M${px(0)},${py(prices[0])} ` + prices.slice(1).map((v, i) => `L${px(i + 1)},${py(v)}`).join(' ') + ` L${px(prices.length - 1)},${height} L0,${height} Z`;
-
   return (
     <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ display: 'block' }}>
       <defs>
-        <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+        <linearGradient id="ag" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor="#00d4a8" stopOpacity="0.3" />
           <stop offset="100%" stopColor="#00d4a8" stopOpacity="0.02" />
         </linearGradient>
       </defs>
-      <path d={areaPath} fill="url(#areaGrad)" />
+      <path d={areaPath} fill="url(#ag)" />
       <path d={`M${px(0)},${py(prices[0])} ` + prices.slice(1).map((v, i) => `L${px(i + 1)},${py(v)}`).join(' ')} fill="none" stroke="#00d4a8" strokeWidth="2" />
       {sma20 && <path d={line(sma20)} fill="none" stroke="#f5a623" strokeWidth="1.2" strokeDasharray="4,2" />}
       {sma50 && <path d={line(sma50)} fill="none" stroke="#7b68ee" strokeWidth="1.2" strokeDasharray="4,2" />}
+      {strikeLevel && strikeLevel >= min && strikeLevel <= max && <>
+        <line x1="0" y1={py(strikeLevel)} x2={width} y2={py(strikeLevel)} stroke="#ff4d6d" strokeWidth="1.5" strokeDasharray="6,3" />
+        <text x={width - 4} y={py(strikeLevel) - 4} textAnchor="end" fill="#ff4d6d" fontSize="9">Strike</text>
+      </>}
     </svg>
   );
 }
 
+// ── Greek Card ────────────────────────────────────────────────────────────
+function GreekCard({ label, value, description, color = "#e8eaf6", fmt }) {
+  const display = fmt ? fmt(value) : (typeof value === 'number' ? value.toFixed(4) : value);
+  return (
+    <div style={{ background: "#0a0e1a", borderRadius: 8, padding: "12px 14px" }}>
+      <div style={{ fontSize: 9, color: "#4a6080", letterSpacing: "0.1em", marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 20, fontWeight: 700, color, fontFamily: "'IBM Plex Mono',monospace" }}>{display}</div>
+      <div style={{ fontSize: 9, color: "#3a5070", marginTop: 3, lineHeight: 1.5 }}>{description}</div>
+    </div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────
 export default function PutAgent() {
   const [ticker, setTicker] = useState("BOVA11");
   const [customTicker, setCustomTicker] = useState("");
@@ -220,11 +321,20 @@ export default function PutAgent() {
   const [messages, setMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState("analise");
   const chatEndRef = useRef(null);
+
+  // Greeks state
+  const [gStrike, setGStrike] = useState("");
+  const [mPlace, setMPlace] = useState("");
+  const [impdVol, setImpdVol] = useState("");
+  const [gExpiry, setGExpiry] = useState("");
+  const [gType, setGType] = useState("PUT");
+  const [gRate, setGRate] = useState("13.75");
+  const [greeks, setGreeks] = useState(null);
 
   const activeTicker = customTicker.trim().toUpperCase() || ticker;
   const priceData = MOCK_HISTORY[activeTicker] || MOCK_HISTORY["BOVA11"];
-
   const sma20 = calcSMA(priceData, 20);
   const sma50 = calcSMA(priceData, 10);
   const rsiValues = calcRSI(priceData);
@@ -232,74 +342,47 @@ export default function PutAgent() {
   const lastPrice = priceData.at(-1)?.close;
   const firstPrice = priceData[0]?.close;
   const trend = ((lastPrice - firstPrice) / firstPrice) * 100;
-  const vol = calcVolatility(priceData);
+  const volDecimal = calcVolatility(priceData);
+  const vol = volDecimal * 100;
   const lastSMA20 = sma20.filter(v => v !== null).at(-1);
   const lastSMA50 = sma50.filter(v => v !== null).at(-1);
 
-  const indicators = {
-    ticker: activeTicker,
-    lastPrice,
-    trend: trend.toFixed(2),
-    rsi: lastRSI?.toFixed(1),
-    volatility: vol.toFixed(1),
-    sma20: lastSMA20?.toFixed(2),
-    sma50: lastSMA50?.toFixed(2),
-    priceAboveSMA20: lastPrice > lastSMA20,
-    priceAboveSMA50: lastPrice > lastSMA50,
-    expiry,
-    priceData: priceData.map(d => `${d.date}: R$${d.close}`).join(", "),
+  const computeGreeks = () => {
+    const K = parseFloat(gStrike);
+    const r = parseFloat(gRate) / 100;
+    if (!K || !gExpiry || isNaN(K)) return;
+    const today = new Date();
+    const expiryDate = new Date(gExpiry);
+    const T = Math.max((expiryDate - today) / (365 * 24 * 60 * 60 * 1000), 0.001);
+    const daysLeft = Math.max(Math.round((expiryDate - today) / (24 * 60 * 60 * 1000)), 0);
+    const bs = blackScholes(lastPrice, K, T, r, volDecimal, gType);
+    const marketPrice = parseFloat(mPlace);
+    const impdVol = Math.max(impliedVolatility(lastPrice, K, T, r, marketPrice, gType) * 100).toFixed(2);
+    setImpdVol(impdVol);
+    const prices = priceData.map(d => d.close);
+    const percentile = calcPercentile(prices, K);
+    const otmPct = gType === "PUT" ? ((lastPrice - K) / lastPrice) * 100 : ((K - lastPrice) / lastPrice) * 100;
+    setGreeks({ ...bs, percentile, otmPct, K, T, daysLeft });
   };
 
-  const buildPrompt = (ind) => `
-Você é um especialista em opções da B3 (Bolsa brasileira). Analise os dados abaixo e dê uma recomendação objetiva sobre lançamento de PUT (venda de opção de venda).
-
-DADOS DO ATIVO:
-- Ticker: ${ind.ticker}
-- Preço atual: R$ ${ind.lastPrice}
-- Tendência (período analisado): ${ind.trend}%
-- RSI (14): ${ind.rsi}
-- Volatilidade implícita histórica anualizada: ${ind.volatility}%
-- SMA 20: R$ ${ind.sma20} — preço ${ind.priceAboveSMA20 ? "ACIMA" : "ABAIXO"} da SMA20
-- SMA 50 (curta): R$ ${ind.sma50} — preço ${ind.priceAboveSMA50 ? "ACIMA" : "ABAIXO"} da SMA50
-- Vencimento alvo: ${ind.expiry} dias úteis
-- Histórico de fechamentos: ${ind.priceData}
-
-RESPONDA EXATAMENTE no formato JSON abaixo, sem markdown, sem texto extra:
-{
-  "veredicto": "FAVORÁVEL" | "NEUTRO" | "DESFAVORÁVEL",
-  "score": <número 0-100 indicando força da recomendação>,
-  "tendencia": "ALTA" | "LATERAL" | "QUEDA",
-  "strikes_sugeridos": [<3 valores de strike OTM em R$>],
-  "premio_estimado_pct": <% do strike como prêmio estimado>,
-  "risco_principal": "<frase curta>",
-  "justificativa": "<2-3 frases técnicas>",
-  "alerta": "<aviso importante ou null>"
-}`;
+  const buildPrompt = ind => `
+Você é um especialista em opções da B3. Analise os dados e dê recomendação objetiva sobre lançamento de PUT.
+DADOS: Ticker ${ind.ticker}, Preço R$${ind.lastPrice}, Tendência ${ind.trend}%, RSI ${ind.rsi}, Vol ${ind.volatility}%, SMA20 R$${ind.sma20} (preço ${ind.priceAboveSMA20 ? "ACIMA" : "ABAIXO"}), vencimento ${ind.expiry}d.
+Histórico: ${ind.priceData}
+RESPONDA APENAS JSON sem markdown:
+{"veredicto":"FAVORÁVEL"|"NEUTRO"|"DESFAVORÁVEL","score":<0-100>,"tendencia":"ALTA"|"LATERAL"|"QUEDA","strikes_sugeridos":[<3 strikes OTM>],"premio_estimado_pct":<número>,"risco_principal":"<frase>","justificativa":"<2-3 frases>","alerta":"<aviso ou null>"}`;
 
   const runAnalysis = async () => {
-    setLoading(true);
-    setAnalysis(null);
+    setLoading(true); setAnalysis(null);
+    const ind = { ticker: activeTicker, lastPrice, trend: trend.toFixed(2), rsi: lastRSI?.toFixed(1), volatility: vol.toFixed(1), sma20: lastSMA20?.toFixed(2), sma50: lastSMA50?.toFixed(2), priceAboveSMA20: lastPrice > lastSMA20, priceAboveSMA50: lastPrice > lastSMA50, expiry, priceData: priceData.map(d => `${d.date}:R$${d.close}`).join(",") };
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          messages: [{ role: "user", content: buildPrompt(indicators) }],
-        }),
-      });
+      const res = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, messages: [{ role: "user", content: buildPrompt(ind) }] }) });
       const data = await res.json();
       const text = data.content.map(b => b.text || "").join("").replace(/```json|```/g, "").trim();
       const parsed = JSON.parse(text);
       setAnalysis(parsed);
-      setMessages([{
-        role: "assistant",
-        content: `Análise concluída para **${activeTicker}**! Veredicto: **${parsed.veredicto}** (score ${parsed.score}/100). Tendência identificada: **${parsed.tendencia}**. Pode me perguntar sobre estratégias, strikes, gestão de risco ou qualquer dúvida sobre a operação.`
-      }]);
-    } catch (e) {
-      setAnalysis({ error: true });
-    }
+      setMessages([{ role: "assistant", content: `Análise de **${activeTicker}** concluída! Veredicto: **${parsed.veredicto}** (score ${parsed.score}/100). Tendência: **${parsed.tendencia}**. Pode perguntar sobre estratégias, strikes ou gestão de risco.` }]);
+    } catch { setAnalysis({ error: true }); }
     setLoading(false);
   };
 
@@ -307,169 +390,97 @@ RESPONDA EXATAMENTE no formato JSON abaixo, sem markdown, sem texto extra:
     if (!chatInput.trim() || chatLoading) return;
     const userMsg = { role: "user", content: chatInput };
     const newMessages = [...messages, userMsg];
-    setMessages(newMessages);
-    setChatInput("");
-    setChatLoading(true);
-
-    const systemCtx = `Você é um especialista em opções da B3. O usuário acabou de analisar ${activeTicker} com os seguintes dados: preço R$${lastPrice}, tendência ${trend.toFixed(1)}%, RSI ${lastRSI?.toFixed(1)}, volatilidade ${vol.toFixed(1)}%, vencimento ${expiry} dias. ${analysis ? `A análise indicou: ${JSON.stringify(analysis)}` : ""}. Responda de forma direta, técnica e em português. Use no máximo 3 parágrafos curtos.`;
-
+    setMessages(newMessages); setChatInput(""); setChatLoading(true);
+    const ctx = `Especialista em opções B3. Ativo: ${activeTicker} R$${lastPrice}, tendência ${trend.toFixed(1)}%, RSI ${lastRSI?.toFixed(1)}, vol ${vol.toFixed(1)}%.${analysis ? ` Análise: ${JSON.stringify(analysis)}` : ""}${greeks ? ` Gregas: delta=${greeks.delta?.toFixed(4)}, theta=${greeks.theta?.toFixed(4)}, gamma=${greeks.gamma?.toFixed(6)}, vega=${greeks.vega?.toFixed(4)}, strike R$${greeks.K}, ${greeks.daysLeft}d.` : ""}. Responda em português, direto, máx 3 parágrafos.`;
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          system: systemCtx,
-          messages: newMessages.map(m => ({ role: m.role, content: m.content })),
-        }),
-      });
+      const res = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system: ctx, messages: newMessages.map(m => ({ role: m.role, content: m.content })) }) });
       const data = await res.json();
-      const reply = data.content.map(b => b.text || "").join("");
-      setMessages(prev => [...prev, { role: "assistant", content: reply }]);
-    } catch {
-      setMessages(prev => [...prev, { role: "assistant", content: "Erro ao conectar com a IA. Tente novamente." }]);
-    }
+      setMessages(prev => [...prev, { role: "assistant", content: data.content.map(b => b.text || "").join("") }]);
+    } catch { setMessages(prev => [...prev, { role: "assistant", content: "Erro. Tente novamente." }]); }
     setChatLoading(false);
   };
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
-  const verdictColor = {
-    "FAVORÁVEL": "#00d4a8",
-    "NEUTRO": "#f5a623",
-    "DESFAVORÁVEL": "#ff4d6d",
-  };
-  const trendIcon = { "ALTA": "↑", "LATERAL": "→", "QUEDA": "↓" };
+  const vc = { "FAVORÁVEL": "#00d4a8", "NEUTRO": "#f5a623", "DESFAVORÁVEL": "#ff4d6d" };
+  const ti = { "ALTA": "↑", "LATERAL": "→", "QUEDA": "↓" };
+  const card = { background: "#0f1628", border: "1px solid #1e2a45", borderRadius: 12, padding: 20 };
+  const lbl = { fontSize: 10, color: "#4a6080", letterSpacing: "0.1em", marginBottom: 14 };
 
   return (
-    <div style={{
-      minHeight: "100vh",
-      background: "#0a0e1a",
-      color: "#e8eaf6",
-      fontFamily: "'IBM Plex Mono', 'Courier New', monospace",
-      padding: "0",
-      overflowX: "hidden",
-    }}>
-      <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap" rel="stylesheet" />
+    <div style={{ minHeight: "100vh", background: "#0a0e1a", color: "#e8eaf6", fontFamily: "'IBM Plex Mono','Courier New',monospace", overflowX: "hidden" }}>
+      <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet" />
 
       {/* Header */}
-      <div style={{
-        borderBottom: "1px solid #1e2a45",
-        padding: "18px 28px",
-        display: "flex",
-        alignItems: "center",
-        gap: "14px",
-        background: "rgba(10,14,26,0.95)",
-        position: "sticky", top: 0, zIndex: 50,
-      }}>
-        <div style={{
-          width: 36, height: 36, borderRadius: 8,
-          background: "linear-gradient(135deg, #00d4a8, #0088ff)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: 18,
-        }}>Ψ</div>
+      <div style={{ borderBottom: "1px solid #1e2a45", padding: "18px 28px", display: "flex", alignItems: "center", gap: 14, background: "rgba(10,14,26,0.97)", position: "sticky", top: 0, zIndex: 50 }}>
+        <div style={{ width: 36, height: 36, borderRadius: 8, background: "linear-gradient(135deg,#00d4a8,#0088ff)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>Ψ</div>
         <div>
-          <div style={{ fontFamily: "'IBM Plex Sans'", fontWeight: 600, fontSize: 15, letterSpacing: "0.04em" }}>
-            PUT AGENT <span style={{ color: "#00d4a8", fontSize: 11, marginLeft: 6 }}>B3 · OPÇÕES</span>
-          </div>
-          <div style={{ fontSize: 10, color: "#4a6080", letterSpacing: "0.08em" }}>ANÁLISE TÉCNICA + IA</div>
+          <div style={{ fontFamily: "'IBM Plex Sans'", fontWeight: 600, fontSize: 15, letterSpacing: "0.04em" }}>PUT AGENT <span style={{ color: "#00d4a8", fontSize: 11, marginLeft: 6 }}>B3 · OPÇÕES</span></div>
+          <div style={{ fontSize: 10, color: "#4a6080", letterSpacing: "0.08em" }}>ANÁLISE TÉCNICA + GREGAS + IA</div>
         </div>
         <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
           {["BOVA11", "PETR4", "VALE3"].map(t => (
-            <button key={t} onClick={() => { setTicker(t); setCustomTicker(""); setAnalysis(null); setMessages([]); }} style={{
-              padding: "5px 12px", borderRadius: 5, border: "1px solid",
-              borderColor: ticker === t && !customTicker ? "#00d4a8" : "#1e2a45",
-              background: ticker === t && !customTicker ? "rgba(0,212,168,0.1)" : "transparent",
-              color: ticker === t && !customTicker ? "#00d4a8" : "#4a6080",
-              cursor: "pointer", fontSize: 11, fontFamily: "inherit", letterSpacing: "0.05em",
-            }}>{t}</button>
+            <button key={t} onClick={() => { setTicker(t); setCustomTicker(""); setAnalysis(null); setMessages([]); setGreeks(null); }} style={{ padding: "5px 12px", borderRadius: 5, border: "1px solid", borderColor: ticker === t && !customTicker ? "#00d4a8" : "#1e2a45", background: ticker === t && !customTicker ? "rgba(0,212,168,0.1)" : "transparent", color: ticker === t && !customTicker ? "#00d4a8" : "#4a6080", cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>{t}</button>
           ))}
         </div>
       </div>
 
-      <div style={{ maxWidth: 960, margin: "0 auto", padding: "24px 20px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+      {/* Tabs */}
+      <div style={{ display: "flex", borderBottom: "1px solid #1e2a45", background: "#0a0e1a", padding: "0 28px" }}>
+        {[["analise", "ANÁLISE IA"], ["gregas", "∂  GREGAS · PERCENTIL"]].map(([key, label]) => (
+          <button key={key} onClick={() => setActiveTab(key)} style={{ padding: "12px 20px", border: "none", borderBottom: `2px solid ${activeTab === key ? "#00d4a8" : "transparent"}`, background: "transparent", color: activeTab === key ? "#00d4a8" : "#4a6080", cursor: "pointer", fontSize: 11, fontFamily: "inherit", letterSpacing: "0.08em" }}>{label}</button>
+        ))}
+      </div>
 
-        {/* Left Panel */}
+      <div style={{ maxWidth: 980, margin: "0 auto", padding: "24px 20px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+
+        {/* LEFT */}
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-
-          {/* Config Card */}
-          <div style={{ background: "#0f1628", border: "1px solid #1e2a45", borderRadius: 12, padding: 20 }}>
-            <div style={{ fontSize: 10, color: "#4a6080", letterSpacing: "0.1em", marginBottom: 14 }}>CONFIGURAÇÃO</div>
-
+          <div style={card}>
+            <div style={lbl}>CONFIGURAÇÃO</div>
             <div style={{ marginBottom: 12 }}>
               <label style={{ fontSize: 10, color: "#7a8aaa", display: "block", marginBottom: 5 }}>TICKER PERSONALIZADO</label>
-              <input
-                value={customTicker}
-                onChange={e => { setCustomTicker(e.target.value); setAnalysis(null); setMessages([]); }}
-                placeholder="Ex: ITUB4, ABEV3..."
-                style={{
-                  width: "100%", background: "#0a0e1a", border: "1px solid #1e2a45",
-                  borderRadius: 6, padding: "8px 12px", color: "#e8eaf6",
-                  fontFamily: "inherit", fontSize: 13, outline: "none",
-                  boxSizing: "border-box",
-                }}
-              />
-              {customTicker && !MOCK_HISTORY[customTicker.toUpperCase()] && (
-                <div style={{ fontSize: 10, color: "#f5a623", marginTop: 4 }}>
-                  ⚠ Usando dados simulados (BOVA11 como proxy)
+              <input value={customTicker} onChange={e => { setCustomTicker(e.target.value); setAnalysis(null); setMessages([]); setGreeks(null); }} placeholder="Ex: ITUB4, ABEV3..."
+                style={{ width: "100%", background: "#0a0e1a", border: "1px solid #1e2a45", borderRadius: 6, padding: "8px 12px", color: "#e8eaf6", fontFamily: "inherit", fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+              {customTicker && !MOCK_HISTORY[customTicker.toUpperCase()] && <div style={{ fontSize: 10, color: "#f5a623", marginTop: 4 }}>⚠ Usando dados simulados (BOVA11 proxy)</div>}
+            </div>
+            {activeTab === "analise" && <>
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 10, color: "#7a8aaa", display: "block", marginBottom: 5 }}>VENCIMENTO ALVO (dias úteis)</label>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {["15", "30", "45", "60"].map(d => (
+                    <button key={d} onClick={() => setExpiry(d)} style={{ flex: 1, padding: "7px 0", borderRadius: 6, border: "1px solid", fontFamily: "inherit", fontSize: 12, cursor: "pointer", borderColor: expiry === d ? "#00d4a8" : "#1e2a45", background: expiry === d ? "rgba(0,212,168,0.12)" : "transparent", color: expiry === d ? "#00d4a8" : "#4a6080" }}>{d}d</button>
+                  ))}
                 </div>
-              )}
-            </div>
-
-            <div style={{ marginBottom: 16 }}>
-              <label style={{ fontSize: 10, color: "#7a8aaa", display: "block", marginBottom: 5 }}>VENCIMENTO (dias úteis)</label>
-              <div style={{ display: "flex", gap: 6 }}>
-                {["15", "30", "45", "60"].map(d => (
-                  <button key={d} onClick={() => setExpiry(d)} style={{
-                    flex: 1, padding: "7px 0", borderRadius: 6,
-                    border: "1px solid", fontFamily: "inherit", fontSize: 12, cursor: "pointer",
-                    borderColor: expiry === d ? "#00d4a8" : "#1e2a45",
-                    background: expiry === d ? "rgba(0,212,168,0.12)" : "transparent",
-                    color: expiry === d ? "#00d4a8" : "#4a6080",
-                  }}>{d}d</button>
-                ))}
               </div>
-            </div>
-
-            <button onClick={runAnalysis} disabled={loading} style={{
-              width: "100%", padding: "11px", borderRadius: 7,
-              background: loading ? "#1e2a45" : "linear-gradient(135deg, #00d4a8, #0088ff)",
-              border: "none", color: loading ? "#4a6080" : "#0a0e1a",
-              fontFamily: "inherit", fontWeight: 600, fontSize: 13,
-              cursor: loading ? "not-allowed" : "pointer",
-              letterSpacing: "0.06em",
-              transition: "all 0.2s",
-            }}>
-              {loading ? "⟳  ANALISANDO..." : "▶  RODAR ANÁLISE IA"}
-            </button>
+              <button onClick={runAnalysis} disabled={loading} style={{ width: "100%", padding: 11, borderRadius: 7, background: loading ? "#1e2a45" : "linear-gradient(135deg,#00d4a8,#0088ff)", border: "none", color: loading ? "#4a6080" : "#0a0e1a", fontFamily: "inherit", fontWeight: 600, fontSize: 13, cursor: loading ? "not-allowed" : "pointer" }}>
+                {loading ? "⟳  ANALISANDO..." : "▶  RODAR ANÁLISE IA"}
+              </button>
+            </>}
           </div>
 
-          {/* Chart Card */}
-          <div style={{ background: "#0f1628", border: "1px solid #1e2a45", borderRadius: 12, padding: 20 }}>
+          <div style={card}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
               <div style={{ fontSize: 10, color: "#4a6080", letterSpacing: "0.1em" }}>GRÁFICO · {activeTicker}</div>
-              <div style={{ fontSize: 18, fontWeight: 600, color: "#e8eaf6" }}>R$ {lastPrice?.toFixed(2)}</div>
+              <div style={{ fontSize: 18, fontWeight: 600 }}>R$ {lastPrice?.toFixed(2)}</div>
             </div>
-            <MiniChart data={priceData} sma20={sma20} sma50={sma50} width={340} height={110} />
+            <MiniChart data={priceData} sma20={sma20} sma50={sma50} strikeLevel={activeTab === "gregas" && greeks?.K ? greeks.K : null} width={340} height={110} />
             <div style={{ display: "flex", gap: 14, marginTop: 10, fontSize: 10, color: "#4a6080" }}>
               <span style={{ color: "#f5a623" }}>── SMA20</span>
               <span style={{ color: "#7b68ee" }}>── SMA10</span>
               <span style={{ color: "#00d4a8" }}>── Preço</span>
+              {activeTab === "gregas" && greeks?.K && <span style={{ color: "#ff4d6d" }}>── Strike</span>}
             </div>
           </div>
 
-          {/* Indicators */}
-          <div style={{ background: "#0f1628", border: "1px solid #1e2a45", borderRadius: 12, padding: 20 }}>
-            <div style={{ fontSize: 10, color: "#4a6080", letterSpacing: "0.1em", marginBottom: 14 }}>INDICADORES TÉCNICOS</div>
+          <div style={card}>
+            <div style={lbl}>INDICADORES TÉCNICOS</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
               {[
                 { label: "TENDÊNCIA", value: `${trend > 0 ? "+" : ""}${trend.toFixed(1)}%`, color: trend > 0 ? "#00d4a8" : "#ff4d6d" },
                 { label: "RSI (14)", value: lastRSI?.toFixed(1), color: lastRSI > 70 ? "#ff4d6d" : lastRSI < 30 ? "#00d4a8" : "#e8eaf6" },
-                { label: "VOLATIL. ANUAL", value: `${vol.toFixed(1)}%`, color: vol > 35 ? "#f5a623" : "#e8eaf6" },
-                { label: "vs SMA20", value: indicators.priceAboveSMA20 ? "ACIMA ↑" : "ABAIXO ↓", color: indicators.priceAboveSMA20 ? "#00d4a8" : "#ff4d6d" },
+                { label: "VOL. ANUAL", value: `${vol.toFixed(1)}%`, color: vol > 35 ? "#f5a623" : "#e8eaf6" },
+                { label: "vs SMA20", value: lastPrice > lastSMA20 ? "ACIMA ↑" : "ABAIXO ↓", color: lastPrice > lastSMA20 ? "#00d4a8" : "#ff4d6d" },
               ].map(({ label, value, color }) => (
                 <div key={label} style={{ background: "#0a0e1a", borderRadius: 8, padding: "10px 12px" }}>
                   <div style={{ fontSize: 9, color: "#4a6080", letterSpacing: "0.08em", marginBottom: 4 }}>{label}</div>
@@ -480,191 +491,234 @@ RESPONDA EXATAMENTE no formato JSON abaixo, sem markdown, sem texto extra:
           </div>
         </div>
 
-        {/* Right Panel */}
+        {/* RIGHT */}
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
 
-          {/* Analysis Result */}
-          {!analysis && !loading && (
-            <div style={{
-              background: "#0f1628", border: "1px dashed #1e2a45",
-              borderRadius: 12, padding: 40, textAlign: "center",
-              display: "flex", flexDirection: "column", alignItems: "center", gap: 12,
-            }}>
-              <div style={{ fontSize: 40, opacity: 0.3 }}>Ψ</div>
-              <div style={{ fontSize: 12, color: "#4a6080", lineHeight: 1.6 }}>
-                Configure o ativo e o vencimento<br />e clique em <strong style={{ color: "#00d4a8" }}>Rodar Análise IA</strong>
+          {/* ═══ ANÁLISE ═══ */}
+          {activeTab === "analise" && <>
+            {!analysis && !loading && (
+              <div style={{ ...card, padding: 40, textAlign: "center", border: "1px dashed #1e2a45", display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+                <div style={{ fontSize: 40, opacity: 0.3 }}>Ψ</div>
+                <div style={{ fontSize: 12, color: "#4a6080", lineHeight: 1.6 }}>Configure o ativo e clique em<br /><strong style={{ color: "#00d4a8" }}>Rodar Análise IA</strong></div>
               </div>
-            </div>
-          )}
-
-          {loading && (
-            <div style={{
-              background: "#0f1628", border: "1px solid #1e2a45",
-              borderRadius: 12, padding: 40, textAlign: "center",
-            }}>
-              <div style={{ fontSize: 11, color: "#4a6080", letterSpacing: "0.1em", marginBottom: 20 }}>
-                PROCESSANDO INDICADORES...
+            )}
+            {loading && (
+              <div style={{ ...card, padding: 40, textAlign: "center" }}>
+                <div style={{ fontSize: 11, color: "#4a6080", letterSpacing: "0.1em", marginBottom: 20 }}>PROCESSANDO...</div>
+                {["Lendo histórico", "Calculando RSI e médias", "Avaliando tendência", "Gerando recomendação"].map((step, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, padding: "0 30px" }}>
+                    <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#00d4a8", animation: `pulse 1.2s ${i * 0.3}s ease-in-out infinite` }} />
+                    <span style={{ fontSize: 11, color: "#4a6080" }}>{step}</span>
+                  </div>
+                ))}
+                <style>{`@keyframes pulse{0%,100%{opacity:.2;transform:scale(.8)}50%{opacity:1;transform:scale(1.2)}}`}</style>
               </div>
-              {["Lendo histórico de cotações", "Calculando RSI e médias", "Avaliando tendência", "Gerando recomendação IA"].map((step, i) => (
-                <div key={i} style={{
-                  display: "flex", alignItems: "center", gap: 10, marginBottom: 8,
-                  justifyContent: "flex-start", padding: "0 30px",
-                }}>
-                  <div style={{
-                    width: 6, height: 6, borderRadius: "50%",
-                    background: "#00d4a8",
-                    animation: `pulse 1.2s ${i * 0.3}s ease-in-out infinite`,
-                  }} />
-                  <span style={{ fontSize: 11, color: "#4a6080" }}>{step}</span>
-                </div>
-              ))}
-              <style>{`@keyframes pulse { 0%,100%{opacity:.2;transform:scale(.8)} 50%{opacity:1;transform:scale(1.2)} }`}</style>
-            </div>
-          )}
-
-          {analysis && !analysis.error && (
-            <>
-              {/* Verdict */}
-              <div style={{
-                background: "#0f1628", border: `1px solid ${verdictColor[analysis.veredicto] || "#1e2a45"}`,
-                borderRadius: 12, padding: 20,
-                boxShadow: `0 0 30px ${verdictColor[analysis.veredicto]}22`,
-              }}>
+            )}
+            {analysis && !analysis.error && <>
+              <div style={{ ...card, border: `1px solid ${vc[analysis.veredicto] || "#1e2a45"}`, boxShadow: `0 0 30px ${vc[analysis.veredicto]}22` }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                   <div>
-                    <div style={{ fontSize: 10, color: "#4a6080", letterSpacing: "0.1em", marginBottom: 6 }}>VEREDICTO IA</div>
-                    <div style={{ fontSize: 26, fontWeight: 700, color: verdictColor[analysis.veredicto] }}>
-                      {analysis.veredicto}
-                    </div>
-                    <div style={{ fontSize: 12, color: "#7a8aaa", marginTop: 4 }}>
-                      Tendência: <span style={{ color: "#e8eaf6" }}>{trendIcon[analysis.tendencia]} {analysis.tendencia}</span>
-                    </div>
+                    <div style={lbl}>VEREDICTO IA</div>
+                    <div style={{ fontSize: 26, fontWeight: 700, color: vc[analysis.veredicto] }}>{analysis.veredicto}</div>
+                    <div style={{ fontSize: 12, color: "#7a8aaa", marginTop: 4 }}>Tendência: <span style={{ color: "#e8eaf6" }}>{ti[analysis.tendencia]} {analysis.tendencia}</span></div>
                   </div>
                   <div style={{ textAlign: "right" }}>
                     <div style={{ fontSize: 10, color: "#4a6080", marginBottom: 4 }}>SCORE</div>
-                    <div style={{ fontSize: 32, fontWeight: 700, color: verdictColor[analysis.veredicto] }}>
-                      {analysis.score}
-                    </div>
+                    <div style={{ fontSize: 32, fontWeight: 700, color: vc[analysis.veredicto] }}>{analysis.score}</div>
                     <div style={{ fontSize: 9, color: "#4a6080" }}>/100</div>
                   </div>
                 </div>
-
-                {/* Score bar */}
                 <div style={{ height: 4, background: "#1e2a45", borderRadius: 2, marginTop: 14, overflow: "hidden" }}>
-                  <div style={{
-                    height: "100%", width: `${analysis.score}%`,
-                    background: `linear-gradient(90deg, ${verdictColor[analysis.veredicto]}, ${verdictColor[analysis.veredicto]}88)`,
-                    borderRadius: 2, transition: "width 1s ease",
-                  }} />
+                  <div style={{ height: "100%", width: `${analysis.score}%`, background: `linear-gradient(90deg,${vc[analysis.veredicto]},${vc[analysis.veredicto]}88)`, borderRadius: 2 }} />
                 </div>
-
-                <div style={{ marginTop: 14, fontSize: 11, color: "#7a8aaa", lineHeight: 1.6 }}>
-                  {analysis.justificativa}
-                </div>
-
-                {analysis.alerta && (
-                  <div style={{
-                    marginTop: 12, padding: "8px 12px", background: "rgba(245,166,35,0.08)",
-                    borderLeft: "3px solid #f5a623", borderRadius: "0 6px 6px 0",
-                    fontSize: 11, color: "#f5a623",
-                  }}>
-                    ⚠ {analysis.alerta}
-                  </div>
-                )}
+                <div style={{ marginTop: 14, fontSize: 11, color: "#7a8aaa", lineHeight: 1.6 }}>{analysis.justificativa}</div>
+                {analysis.alerta && <div style={{ marginTop: 12, padding: "8px 12px", background: "rgba(245,166,35,0.08)", borderLeft: "3px solid #f5a623", borderRadius: "0 6px 6px 0", fontSize: 11, color: "#f5a623" }}>⚠ {analysis.alerta}</div>}
               </div>
 
-              {/* Strikes */}
-              <div style={{ background: "#0f1628", border: "1px solid #1e2a45", borderRadius: 12, padding: 20 }}>
-                <div style={{ fontSize: 10, color: "#4a6080", letterSpacing: "0.1em", marginBottom: 14 }}>
-                  STRIKES SUGERIDOS (OTM) · {expiry}d
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
-                  {(analysis.strikes_sugeridos || []).map((s, i) => {
-                    const otmPct = ((lastPrice - s) / lastPrice * 100).toFixed(1);
+              <div style={card}>
+                <div style={lbl}>STRIKES SUGERIDOS (OTM) · {expiry}d</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+                  {(analysis.strikes_sugeridos || []).map((strike, i) => {
+                    const otm = ((lastPrice - strike) / lastPrice * 100).toFixed(1);
                     return (
-                      <div key={i} style={{
-                        background: "#0a0e1a", borderRadius: 8, padding: "10px 12px", textAlign: "center",
-                        border: i === 1 ? "1px solid #00d4a822" : "1px solid transparent",
-                      }}>
-                        <div style={{ fontSize: 9, color: "#4a6080", marginBottom: 4 }}>
-                          {i === 0 ? "CONSERVADOR" : i === 1 ? "MODERADO ★" : "AGRESSIVO"}
-                        </div>
-                        <div style={{ fontSize: 16, fontWeight: 600, color: i === 1 ? "#00d4a8" : "#e8eaf6" }}>
-                          R$ {s.toFixed(2)}
-                        </div>
-                        <div style={{ fontSize: 10, color: "#4a6080" }}>{otmPct}% OTM</div>
+                      <div key={i} style={{ background: "#0a0e1a", borderRadius: 8, padding: "10px 12px", textAlign: "center", border: i === 1 ? "1px solid #00d4a822" : "1px solid transparent" }}>
+                        <div style={{ fontSize: 9, color: "#4a6080", marginBottom: 4 }}>{i === 0 ? "CONSERVADOR" : i === 1 ? "MODERADO ★" : "AGRESSIVO"}</div>
+                        <div style={{ fontSize: 16, fontWeight: 600, color: i === 1 ? "#00d4a8" : "#e8eaf6" }}>R$ {typeof strike === 'number' ? strike.toFixed(2) : strike}</div>
+                        <div style={{ fontSize: 10, color: "#4a6080" }}>{otm}% OTM</div>
                       </div>
                     );
                   })}
                 </div>
                 <div style={{ marginTop: 12, padding: "8px 12px", background: "#0a0e1a", borderRadius: 6 }}>
-                  <span style={{ fontSize: 10, color: "#4a6080" }}>PRÊMIO ESTIMADO: </span>
-                  <span style={{ fontSize: 12, color: "#00d4a8", fontWeight: 600 }}>
-                    ~{analysis.premio_estimado_pct?.toFixed(1)}% do strike
-                  </span>
-                  <span style={{ fontSize: 10, color: "#4a6080" }}> · Risco: {analysis.risco_principal}</span>
+                  <span style={{ fontSize: 10, color: "#4a6080" }}>PRÊMIO EST.: </span>
+                  <span style={{ fontSize: 12, color: "#00d4a8", fontWeight: 600 }}>~{analysis.premio_estimado_pct?.toFixed(1)}% do strike</span>
+                  <span style={{ fontSize: 10, color: "#4a6080" }}> · {analysis.risco_principal}</span>
                 </div>
               </div>
-            </>
-          )}
+            </>}
 
-          {/* Chat */}
-          {messages.length > 0 && (
-            <div style={{ background: "#0f1628", border: "1px solid #1e2a45", borderRadius: 12, overflow: "hidden" }}>
-              <div style={{ padding: "12px 16px", borderBottom: "1px solid #1e2a45", fontSize: 10, color: "#4a6080", letterSpacing: "0.1em" }}>
-                CHAT COM O AGENTE
+            {messages.length > 0 && (
+              <div style={{ ...card, padding: 0, overflow: "hidden" }}>
+                <div style={{ padding: "12px 16px", borderBottom: "1px solid #1e2a45", fontSize: 10, color: "#4a6080", letterSpacing: "0.1em" }}>CHAT COM O AGENTE</div>
+                <div style={{ maxHeight: 220, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+                  {messages.map((m, i) => (
+                    <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "88%", background: m.role === "user" ? "rgba(0,212,168,0.12)" : "#0a0e1a", border: `1px solid ${m.role === "user" ? "rgba(0,212,168,0.3)" : "#1e2a45"}`, borderRadius: 8, padding: "8px 12px", fontSize: 11, lineHeight: 1.6, color: "#c8d0e0" }}>
+                      {m.content}
+                    </div>
+                  ))}
+                  {chatLoading && <div style={{ alignSelf: "flex-start", fontSize: 11, color: "#4a6080" }}>Agente digitando...</div>}
+                  <div ref={chatEndRef} />
+                </div>
+                <div style={{ padding: "10px 14px", borderTop: "1px solid #1e2a45", display: "flex", gap: 8 }}>
+                  <input value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => e.key === "Enter" && sendChat()} placeholder="Pergunte sobre a estratégia..."
+                    style={{ flex: 1, background: "#0a0e1a", border: "1px solid #1e2a45", borderRadius: 6, padding: "7px 10px", color: "#e8eaf6", fontFamily: "inherit", fontSize: 11, outline: "none" }} />
+                  <button onClick={sendChat} disabled={chatLoading} style={{ padding: "7px 14px", borderRadius: 6, background: "linear-gradient(135deg,#00d4a8,#0088ff)", border: "none", color: "#0a0e1a", fontFamily: "inherit", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>↑</button>
+                </div>
               </div>
-              <div style={{ maxHeight: 220, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
-                {messages.map((m, i) => (
-                  <div key={i} style={{
-                    alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-                    maxWidth: "88%",
-                    background: m.role === "user" ? "rgba(0,212,168,0.12)" : "#0a0e1a",
-                    border: `1px solid ${m.role === "user" ? "rgba(0,212,168,0.3)" : "#1e2a45"}`,
-                    borderRadius: 8, padding: "8px 12px",
-                    fontSize: 11, lineHeight: 1.6, color: "#c8d0e0",
-                  }}>
-                    {m.content}
+            )}
+          </>}
+
+          {/* ═══ GREGAS ═══ */}
+          {activeTab === "gregas" && <>
+            <div style={card}>
+              <div style={lbl}>PARÂMETROS DA OPÇÃO</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+                <div>
+                  <label style={{ fontSize: 10, color: "#7a8aaa", display: "block", marginBottom: 5 }}>TIPO</label>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {["PUT", "CALL"].map(t => (
+                      <button key={t} onClick={() => setGType(t)} style={{ flex: 1, padding: "8px 0", borderRadius: 6, border: "1px solid", fontFamily: "inherit", fontSize: 12, cursor: "pointer", borderColor: gType === t ? (t === "PUT" ? "#ff4d6d" : "#00d4a8") : "#1e2a45", background: gType === t ? (t === "PUT" ? "rgba(255,77,109,0.12)" : "rgba(0,212,168,0.12)") : "transparent", color: gType === t ? (t === "PUT" ? "#ff4d6d" : "#00d4a8") : "#4a6080" }}>{t}</button>
+                    ))}
                   </div>
-                ))}
-                {chatLoading && (
-                  <div style={{ alignSelf: "flex-start", fontSize: 11, color: "#4a6080" }}>
-                    Agente digitando...
-                  </div>
-                )}
-                <div ref={chatEndRef} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#7a8aaa", display: "block", marginBottom: 5 }}>SELIC (% a.a.)</label>
+                  <input value={gRate} onChange={e => setGRate(e.target.value)} style={{ width: "100%", background: "#0a0e1a", border: "1px solid #1e2a45", borderRadius: 6, padding: "8px 10px", color: "#e8eaf6", fontFamily: "inherit", fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+                </div>
               </div>
-              <div style={{ padding: "10px 14px", borderTop: "1px solid #1e2a45", display: "flex", gap: 8 }}>
-                <input
-                  value={chatInput}
-                  onChange={e => setChatInput(e.target.value)}
-                  onKeyDown={e => e.key === "Enter" && sendChat()}
-                  placeholder="Pergunte sobre a estratégia..."
-                  style={{
-                    flex: 1, background: "#0a0e1a", border: "1px solid #1e2a45",
-                    borderRadius: 6, padding: "7px 10px", color: "#e8eaf6",
-                    fontFamily: "inherit", fontSize: 11, outline: "none",
-                  }}
-                />
-                <button onClick={sendChat} disabled={chatLoading} style={{
-                  padding: "7px 14px", borderRadius: 6,
-                  background: "linear-gradient(135deg, #00d4a8, #0088ff)",
-                  border: "none", color: "#0a0e1a", fontFamily: "inherit",
-                  fontSize: 11, fontWeight: 600, cursor: "pointer",
-                }}>↑</button>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+                <div>
+                  <label style={{ fontSize: 10, color: "#7a8aaa", display: "block", marginBottom: 5 }}>STRIKE (R$)</label>
+                  <input value={gStrike} onChange={e => setGStrike(e.target.value)} placeholder={`ex: ${(lastPrice * 0.95).toFixed(2)}`}
+                    style={{ width: "100%", background: "#0a0e1a", border: "1px solid #1e2a45", borderRadius: 6, padding: "8px 10px", color: "#e8eaf6", fontFamily: "inherit", fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#7a8aaa", display: "block", marginBottom: 5 }}>VENCIMENTO</label>
+                  <input type="date" value={gExpiry} onChange={e => setGExpiry(e.target.value)}
+                    style={{ width: "100%", background: "#0a0e1a", border: "1px solid #1e2a45", borderRadius: 6, padding: "8px 10px", color: "#e8eaf6", fontFamily: "inherit", fontSize: 13, outline: "none", boxSizing: "border-box", colorScheme: "dark" }} />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#7a8aaa", display: "block", marginBottom: 5 }}>MARKETPLACE (R$)</label>
+                  <input value={mPlace} onChange={e => setMPlace(e.target.value)} placeholder={`ex: 2,00`}
+                    style={{ width: "100%", background: "#0a0e1a", border: "1px solid #1e2a45", borderRadius: 6, padding: "8px 10px", color: "#e8eaf6", fontFamily: "inherit", fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+                </div>
               </div>
+              <div style={{ padding: "8px 12px", background: "#0a0e1a", borderRadius: 6, marginBottom: 14, fontSize: 11, color: "#4a6080" }}>
+                Spot: <span style={{ color: "#00d4a8" }}>R$ {lastPrice?.toFixed(2)}</span> · Vol histórica: <span style={{ color: "#f5a623" }}>{vol.toFixed(1)}%</span> · {activeTicker}
+              </div>
+              <button onClick={computeGreeks} style={{ width: "100%", padding: 11, borderRadius: 7, background: "linear-gradient(135deg,#7b68ee,#0088ff)", border: "none", color: "#fff", fontFamily: "inherit", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
+                ∂  CALCULAR GREGAS
+              </button>
             </div>
-          )}
 
+            {!greeks && (
+              <div style={{ ...card, padding: 40, textAlign: "center", border: "1px dashed #1e2a45", display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+                <div style={{ fontSize: 36, opacity: 0.3 }}>∂</div>
+                <div style={{ fontSize: 12, color: "#4a6080", lineHeight: 1.6 }}>Preencha os dados da opção<br />e clique em <strong style={{ color: "#7b68ee" }}>Calcular Gregas</strong></div>
+              </div>
+            )}
+
+            {greeks && <>
+              {/* Prêmio + Percentil */}
+              <div style={{ ...card, border: "1px solid #7b68ee44", boxShadow: "0 0 24px #7b68ee18" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
+                  <div>
+                    <div style={lbl}>PRÊMIO TEÓRICO · {gType}</div>
+                    <div style={{ fontSize: 28, fontWeight: 700, color: "#7b68ee" }}>R$ {greeks.price?.toFixed(4)}</div>
+                    <div style={{ fontSize: 11, color: "#4a6080", marginTop: 4 }}>Strike R$ {greeks.K?.toFixed(2)} · {greeks.daysLeft}d para vencer · {impdVol} Vol. Implícita</div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: 10, color: "#4a6080", marginBottom: 4 }}>MONEYNESS</div>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: greeks.otmPct > 0 ? "#00d4a8" : "#ff4d6d" }}>
+                      {greeks.otmPct > 0 ? "-" : "+"}{Math.abs(greeks.otmPct).toFixed(1)}%
+                    </div>
+                    <div style={{ fontSize: 9, color: "#4a6080" }}>{greeks.otmPct > 0 ? "fora do dinheiro" : "dentro do dinheiro"}</div>
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                    <span style={{ fontSize: 10, color: "#4a6080" }}>PERCENTIL DO STRIKE NO HISTÓRICO 1 ANO</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: greeks.percentile < 20 ? "#00d4a8" : greeks.percentile > 70 ? "#ff4d6d" : "#f5a623" }}>{greeks.percentile.toFixed(1)}%</span>
+                  </div>
+                  <div style={{ height: 8, background: "#1e2a45", borderRadius: 4, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${greeks.percentile}%`, background: `linear-gradient(90deg,#00d4a8,${greeks.percentile > 70 ? "#ff4d6d" : "#f5a623"})`, borderRadius: 4, transition: "width 0.8s ease" }} />
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5 }}>
+                    <span style={{ fontSize: 9, color: "#2a3a55" }}>mín</span>
+                    <span style={{ fontSize: 10, color: greeks.percentile < 20 ? "#00d4a8" : greeks.percentile > 70 ? "#ff4d6d" : "#f5a623" }}>
+                      {greeks.percentile < 20 ? "✓ Strike bem abaixo do histórico — seguro" : greeks.percentile > 70 ? "⚠ Strike alto — risco de exercício elevado" : "→ Faixa intermediária"}
+                    </span>
+                    <span style={{ fontSize: 9, color: "#2a3a55" }}>máx</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Greeks Grid */}
+              <div style={card}>
+                <div style={lbl}>GREGAS · BLACK-SCHOLES</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                  <GreekCard label="DELTA (Δ)" value={greeks.delta}
+                    color={Math.abs(greeks.delta) < 0.2 ? "#00d4a8" : Math.abs(greeks.delta) > 0.5 ? "#ff4d6d" : "#f5a623"}
+                    description={`±R$${Math.abs(greeks.delta).toFixed(4)} no prêmio por R$1 no spot. ${Math.abs(greeks.delta) < 0.2 ? "Baixo risco direcional." : Math.abs(greeks.delta) > 0.5 ? "Alto risco!" : "Moderado."}`}
+                  />
+                  <GreekCard label="THETA (Θ) /dia" value={greeks.theta}
+                    color="#00d4a8"
+                    description={`Decaimento: +R$${Math.abs(greeks.theta).toFixed(4)}/dia a seu favor como lançador.`}
+                  />
+                  <GreekCard label="GAMMA (Γ)" value={greeks.gamma} fmt={v => v.toFixed(6)}
+                    color="#f5a623"
+                    description="Variação do Delta por R$1 no spot. Aumenta perto do vencimento."
+                  />
+                  <GreekCard label="VEGA (ν) /1%vol" value={greeks.vega}
+                    color="#7b68ee"
+                    description="Impacto de 1% de alta na volatilidade implícita sobre o prêmio."
+                  />
+                </div>
+                <div style={{ marginTop: 14, padding: "10px 14px", background: "#0a0e1a", borderRadius: 8, fontSize: 11, color: "#7a8aaa", lineHeight: 1.7 }}>
+                  <span style={{ color: "#4a6080", display: "block", fontSize: 9, letterSpacing: "0.08em", marginBottom: 4 }}>LEITURA RÁPIDA</span>
+                  {gType === "PUT"
+                    ? <>Delta <span style={{ color: "#e8eaf6" }}>{greeks.delta?.toFixed(4)}</span> → a PUT perde <span style={{ color: "#e8eaf6" }}>R${Math.abs(greeks.delta).toFixed(4)}</span> por real de alta no spot. Theta <span style={{ color: "#00d4a8" }}>{Math.abs(greeks.theta).toFixed(4)}</span> → você lucra <span style={{ color: "#00d4a8" }}>R${Math.abs(greeks.theta).toFixed(4)}</span> por dia pelo decaimento do prêmio.</>
+                    : <>Delta <span style={{ color: "#e8eaf6" }}>{greeks.delta?.toFixed(4)}</span> → a CALL ganha <span style={{ color: "#e8eaf6" }}>R${Math.abs(greeks.delta).toFixed(4)}</span> por real de alta. Theta <span style={{ color: "#00d4a8" }}>{Math.abs(greeks.theta).toFixed(4)}</span> → decaimento de R${Math.abs(greeks.theta).toFixed(4)}/dia.</>
+                  }
+                </div>
+              </div>
+
+              {/* Chat in gregas tab */}
+              <div style={{ ...card, padding: 0, overflow: "hidden" }}>
+                <div style={{ padding: "12px 16px", borderBottom: "1px solid #1e2a45", fontSize: 10, color: "#4a6080", letterSpacing: "0.1em" }}>CHAT COM O AGENTE</div>
+                <div style={{ maxHeight: 180, overflowY: "auto", padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+                  {messages.length === 0 && <div style={{ fontSize: 11, color: "#2a3a55", textAlign: "center", padding: "10px 0" }}>Pergunte sobre as gregas ou estratégia...</div>}
+                  {messages.slice(-6).map((m, i) => (
+                    <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "88%", background: m.role === "user" ? "rgba(0,212,168,0.12)" : "#0a0e1a", border: `1px solid ${m.role === "user" ? "rgba(0,212,168,0.3)" : "#1e2a45"}`, borderRadius: 8, padding: "8px 12px", fontSize: 11, lineHeight: 1.6, color: "#c8d0e0" }}>
+                      {m.content}
+                    </div>
+                  ))}
+                  {chatLoading && <div style={{ alignSelf: "flex-start", fontSize: 11, color: "#4a6080" }}>Agente digitando...</div>}
+                  <div ref={chatEndRef} />
+                </div>
+                <div style={{ padding: "10px 14px", borderTop: "1px solid #1e2a45", display: "flex", gap: 8 }}>
+                  <input value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => e.key === "Enter" && sendChat()} placeholder="Ex: esse Delta está bom para lançar?"
+                    style={{ flex: 1, background: "#0a0e1a", border: "1px solid #1e2a45", borderRadius: 6, padding: "7px 10px", color: "#e8eaf6", fontFamily: "inherit", fontSize: 11, outline: "none" }} />
+                  <button onClick={sendChat} disabled={chatLoading} style={{ padding: "7px 14px", borderRadius: 6, background: "linear-gradient(135deg,#7b68ee,#0088ff)", border: "none", color: "#fff", fontFamily: "inherit", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>↑</button>
+                </div>
+              </div>
+            </>}
+          </>}
         </div>
       </div>
 
-      {/* Disclaimer */}
-      <div style={{
-        textAlign: "center", padding: "16px 20px",
-        fontSize: 9, color: "#2a3a55", letterSpacing: "0.05em",
-        borderTop: "1px solid #0f1628",
-      }}>
+      <div style={{ textAlign: "center", padding: "16px 20px", fontSize: 9, color: "#2a3a55", letterSpacing: "0.05em", borderTop: "1px solid #0f1628" }}>
         AVISO: ANÁLISE INFORMATIVA · NÃO CONSTITUI RECOMENDAÇÃO DE INVESTIMENTO · OPÇÕES ENVOLVEM RISCO DE PERDA TOTAL DO CAPITAL
       </div>
     </div>
