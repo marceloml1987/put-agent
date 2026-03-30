@@ -222,6 +222,13 @@ function calcPercentile(prices, strike) {
   return (sorted.filter(p => p <= strike).length / sorted.length) * 100;
 }
 
+function probITM(S, K, T, r, sigma, type) {
+  const d2 = (Math.log(S / K) + (r - 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
+  return type === "PUT"
+    ? normCDF(-d2)
+    : normCDF(d2);
+}
+
 // ── Technical indicators ──────────────────────────────────────────────────
 function calcSMA(data, period) {
   return data.map((_, i) => {
@@ -360,7 +367,8 @@ export default function PutAgent() {
     const impdVol = Math.max(impliedVolatility(lastPrice, K, T, r, marketPrice, gType) * 100).toFixed(2);
     setImpdVol(impdVol);
     const prices = priceData.map(d => d.close);
-    const percentile = calcPercentile(prices, K);
+    //const percentile = calcPercentile(prices, K);
+    const percentile = probITM(lastPrice, K, T, r, volDecimal, gType);
     const otmPct = gType === "PUT" ? ((lastPrice - K) / lastPrice) * 100 : ((K - lastPrice) / lastPrice) * 100;
     setGreeks({ ...bs, percentile, otmPct, K, T, daysLeft });
   };
@@ -649,15 +657,15 @@ RESPONDA APENAS JSON sem markdown:
                 <div>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                     <span style={{ fontSize: 10, color: "#4a6080" }}>PERCENTIL DO STRIKE NO HISTÓRICO 1 ANO</span>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: greeks.percentile < 20 ? "#00d4a8" : greeks.percentile > 70 ? "#ff4d6d" : "#f5a623" }}>{greeks.percentile.toFixed(1)}%</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: (greeks.percentile * 100) < 20 ? "#00d4a8" : (greeks.percentile * 100) > 70 ? "#ff4d6d" : "#f5a623" }}>{(greeks.percentile * 100).toFixed(1)}%</span>
                   </div>
                   <div style={{ height: 8, background: "#1e2a45", borderRadius: 4, overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${greeks.percentile}%`, background: `linear-gradient(90deg,#00d4a8,${greeks.percentile > 70 ? "#ff4d6d" : "#f5a623"})`, borderRadius: 4, transition: "width 0.8s ease" }} />
+                    <div style={{ height: "100%", width: `${(greeks.percentile * 100)}%`, background: `linear-gradient(90deg,#00d4a8,${(greeks.percentile * 100) > 70 ? "#ff4d6d" : "#f5a623"})`, borderRadius: 4, transition: "width 0.8s ease" }} />
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5 }}>
                     <span style={{ fontSize: 9, color: "#2a3a55" }}>mín</span>
-                    <span style={{ fontSize: 10, color: greeks.percentile < 20 ? "#00d4a8" : greeks.percentile > 70 ? "#ff4d6d" : "#f5a623" }}>
-                      {greeks.percentile < 20 ? "✓ Strike bem abaixo do histórico — seguro" : greeks.percentile > 70 ? "⚠ Strike alto — risco de exercício elevado" : "→ Faixa intermediária"}
+                    <span style={{ fontSize: 10, color: (greeks.percentile * 100) < 20 ? "#00d4a8" : (greeks.percentile * 100) > 70 ? "#ff4d6d" : "#f5a623" }}>
+                      {greeks.percentile < 20 ? "✓ Strike bem abaixo do histórico — seguro" : (greeks.percentile * 100) > 70 ? "⚠ Strike alto — risco de exercício elevado" : "→ Faixa intermediária"}
                     </span>
                     <span style={{ fontSize: 9, color: "#2a3a55" }}>máx</span>
                   </div>
