@@ -127,7 +127,7 @@ const MOCK_HISTORY = {
     { date: "2026-03-19", close: 177.15 }, { date: "2026-03-20", close: 173.01 },
     { date: "2026-03-23", close: 178.90 }, { date: "2026-03-24", close: 179.19 },
     { date: "2026-03-25", close: 182.20 }, { date: "2026-03-26", close: 179.45 },
-    { date: "2026-03-27", close: 177.74 },
+    { date: "2026-03-27", close: 177.74 }, { date: "2026-03-27", close: 179.00 },
   ],
   PETR4: [
     { date: "2025-09-01", close: 38.20 }, { date: "2025-09-08", close: 37.50 },
@@ -275,6 +275,51 @@ function calcVolatility(data) {
   return Math.sqrt(variance * 252);
 }
 
+function calcHVPercentil(priceData) {
+
+  let returns = [];
+  for (var i = 1; i < priceData.length; i++) {
+    returns.push(Math.log(priceData[i].close / priceData[i - 1].close));
+  }
+
+  const volatilidades = rollingVolatility(returns, 21);
+
+  const currentVol = volatilidades[volatilidades.length - 1];
+  const historicalVols = volatilidades.slice(0, -1);
+
+  const volPercentil = calcVolPercentile(historicalVols, currentVol);
+  console.log(volPercentil);
+  return volPercentil;
+}
+
+function rollingVolatility(returns, window) {
+  var vols = [];
+
+  for (var i = window; i < returns.length; i++) {
+    var slice = returns.slice(i - window, i);
+
+    var mean = slice.reduce((a, b) => a + b, 0) / window;
+
+    var variance = slice.reduce(function (sum, r) {
+      return sum + Math.pow(r - mean, 2);
+    }, 0) / window;
+
+    var vol = Math.sqrt(variance) * Math.sqrt(252);
+
+    vols.push(vol);
+  }
+
+  return vols;
+}
+
+function calcVolPercentile(vols, currentVol) {
+  var count = vols.filter(function (v) {
+    return v <= currentVol;
+  }).length;
+
+  return (count / vols.length) * 100;
+}
+
 // ── Mini Chart ────────────────────────────────────────────────────────────
 function MiniChart({ data, sma20, sma50, strikeLevel, width = 340, height = 120 }) {
   if (!data || data.length === 0) return null;
@@ -367,10 +412,12 @@ export default function PutAgent() {
     const impdVol = Math.max(impliedVolatility(lastPrice, K, T, r, marketPrice, gType) * 100).toFixed(2);
     setImpdVol(impdVol);
     const prices = priceData.map(d => d.close);
-    //const percentile = calcPercentile(prices, K);
-    const percentile = probITM(lastPrice, K, T, r, volDecimal, gType);
+    const percentile = calcPercentile(prices, K);
+    const prob = probITM(lastPrice, K, T, r, volDecimal, gType);
     const otmPct = gType === "PUT" ? ((lastPrice - K) / lastPrice) * 100 : ((K - lastPrice) / lastPrice) * 100;
-    setGreeks({ ...bs, percentile, otmPct, K, T, daysLeft });
+    const hvPercentil = calcHVPercentil(priceData);
+
+    setGreeks({ ...bs, percentile, otmPct, K, T, daysLeft, prob, hvPercentil });
   };
 
   const buildPrompt = ind => `
@@ -654,22 +701,58 @@ RESPONDA APENAS JSON sem markdown:
                   </div>
                 </div>
 
+
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                    <span style={{ fontSize: 10, color: "#4a6080" }}>HV Percentil</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: (greeks.hvPercentil) < 20 ? "#00d4a8" : (greeks.hvPercentil) > 70 ? "#ff4d6d" : "#f5a623" }}>{greeks.hvPercentil}%</span>
+                  </div>
+                  <div style={{ height: 8, background: "#1e2a45", borderRadius: 4, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${(greeks.hvPercentil)}%`, background: `linear-gradient(90deg,#00d4a8,${(greeks.hvPercentil) > 70 ? "#ff4d6d" : "#f5a623"})`, borderRadius: 4, transition: "width 0.8s ease" }} />
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5 }}>
+                    <span style={{ fontSize: 9, color: "#2a3a55" }}>Baixa</span>
+                    <span style={{ fontSize: 10, color: (greeks.hvPercentil) < 20 ? "#00d4a8" : (greeks.hvPercentil) > 70 ? "#ff4d6d" : "#f5a623" }}>
+                      {greeks.hvPercentil < 20 ? "Vol baixa — prêmios baratos (melhor comprar vol)" : (greeks.hvPercentil) > 70 ? "Vol alta — prêmios caros (melhor vender vol)" : "→ Vol neutra"}
+                    </span>
+                    <span style={{ fontSize: 9, color: "#2a3a55" }}>Alta</span>
+                  </div>
+                </div>
+
                 <div>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                     <span style={{ fontSize: 10, color: "#4a6080" }}>PERCENTIL DO STRIKE NO HISTÓRICO 1 ANO</span>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: (greeks.percentile * 100) < 20 ? "#00d4a8" : (greeks.percentile * 100) > 70 ? "#ff4d6d" : "#f5a623" }}>{(greeks.percentile * 100).toFixed(1)}%</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: (greeks.percentile) < 20 ? "#00d4a8" : (greeks.percentile) > 70 ? "#ff4d6d" : "#f5a623" }}>{(greeks.percentile).toFixed(1)}%</span>
                   </div>
                   <div style={{ height: 8, background: "#1e2a45", borderRadius: 4, overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${(greeks.percentile * 100)}%`, background: `linear-gradient(90deg,#00d4a8,${(greeks.percentile * 100) > 70 ? "#ff4d6d" : "#f5a623"})`, borderRadius: 4, transition: "width 0.8s ease" }} />
+                    <div style={{ height: "100%", width: `${(greeks.percentile)}%`, background: `linear-gradient(90deg,#00d4a8,${(greeks.percentile) > 70 ? "#ff4d6d" : "#f5a623"})`, borderRadius: 4, transition: "width 0.8s ease" }} />
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5 }}>
                     <span style={{ fontSize: 9, color: "#2a3a55" }}>mín</span>
-                    <span style={{ fontSize: 10, color: (greeks.percentile * 100) < 20 ? "#00d4a8" : (greeks.percentile * 100) > 70 ? "#ff4d6d" : "#f5a623" }}>
-                      {greeks.percentile < 20 ? "✓ Strike bem abaixo do histórico — seguro" : (greeks.percentile * 100) > 70 ? "⚠ Strike alto — risco de exercício elevado" : "→ Faixa intermediária"}
+                    <span style={{ fontSize: 10, color: (greeks.percentile) < 20 ? "#00d4a8" : (greeks.percentile) > 70 ? "#ff4d6d" : "#f5a623" }}>
+                      {greeks.percentile < 20 ? "✓ Strike bem abaixo do histórico — seguro" : (greeks.percentile) > 70 ? "⚠ Strike alto — risco de exercício elevado" : "→ Faixa intermediária"}
                     </span>
                     <span style={{ fontSize: 9, color: "#2a3a55" }}>máx</span>
                   </div>
                 </div>
+
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                    <span style={{ fontSize: 10, color: "#4a6080" }}>Chance de terminar ITM</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: (greeks.prob * 100) < 20 ? "#00d4a8" : (greeks.prob * 100) > 70 ? "#ff4d6d" : "#f5a623" }}>{(greeks.prob * 100).toFixed(1)}%</span>
+                  </div>
+                  <div style={{ height: 8, background: "#1e2a45", borderRadius: 4, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${(greeks.prob * 100)}%`, background: `linear-gradient(90deg,#00d4a8,${(greeks.prob * 100) > 70 ? "#ff4d6d" : "#f5a623"})`, borderRadius: 4, transition: "width 0.8s ease" }} />
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5 }}>
+                    <span style={{ fontSize: 9, color: "#2a3a55" }}>mín</span>
+                    <span style={{ fontSize: 10, color: (greeks.prob * 100) < 20 ? "#00d4a8" : (greeks.prob * 100) > 70 ? "#ff4d6d" : "#f5a623" }}>
+                      {(greeks.prob * 100) < 20 ? "✓ Baixa probabilidade de exercício" : (greeks.prob * 100) > 70 ? "⚠ Alta probabilidade de exercício" : "→ Probabilidade moderada"}
+                    </span>
+                    <span style={{ fontSize: 9, color: "#2a3a55" }}>máx</span>
+                  </div>
+                </div>
+
               </div>
 
               {/* Greeks Grid */}
