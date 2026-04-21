@@ -127,7 +127,11 @@ const MOCK_HISTORY = {
     { date: "2026-03-19", close: 177.15 }, { date: "2026-03-20", close: 173.01 },
     { date: "2026-03-23", close: 178.90 }, { date: "2026-03-24", close: 179.19 },
     { date: "2026-03-25", close: 182.20 }, { date: "2026-03-26", close: 179.45 },
-    { date: "2026-03-27", close: 177.74 }, { date: "2026-03-27", close: 179.00 },
+    { date: "2026-03-27", close: 177.74 }, { date: "2026-03-30", close: 179.01 },
+    { date: "2026-03-31", close: 184.28 }, { date: "2026-04-01", close: 184.22 },
+    { date: "2026-04-02", close: 184.75 }, { date: "2026-04-06", close: 184.60 },
+    { date: "2026-04-07", close: 185.21 }, { date: "2026-04-08", close: 188.71 },
+    { date: "2026-04-09", close: 191.90 }, { date: "2026-04-10", close: 194.40 },
   ],
   PETR4: [
     { date: "2025-09-01", close: 38.20 }, { date: "2025-09-08", close: 37.50 },
@@ -249,14 +253,15 @@ function calcRSI(data, period = 14) {
   });
 }
 
-function calcVolatility(data) {
-  if (!data || data.length < 2) return 0;
+function calcVolatility(data, window) {
+  if (!data || data.length < window) return 0;
 
+  var sliced = data.slice(-window);
   var returns = [];
 
-  for (var i = 1; i < data.length; i++) {
-    var prev = data[i - 1].close;
-    var curr = data[i].close;
+  for (var i = 1; i < sliced.length; i++) {
+    var prev = sliced[i - 1].close;
+    var curr = sliced[i].close;
 
     if (prev > 0 && curr > 0) {
       returns.push(Math.log(curr / prev));
@@ -266,11 +271,9 @@ function calcVolatility(data) {
   var n = returns.length;
   if (n < 2) return 0;
 
-  var mean = returns.reduce(function (s, r) { return s + r; }, 0) / n;
-
   var variance = returns.reduce(function (s, r) {
-    return s + Math.pow(r - mean, 2);
-  }, 0) / (n - 1); // 👈 ajuste aqui
+    return s + r * r; // sem média (mais próximo do mercado)
+  }, 0) / (n - 1);
 
   return Math.sqrt(variance * 252);
 }
@@ -382,7 +385,7 @@ export default function PutAgent() {
   const [impdVol, setImpdVol] = useState("");
   const [gExpiry, setGExpiry] = useState("");
   const [gType, setGType] = useState("PUT");
-  const [gRate, setGRate] = useState("13.75");
+  const [gRate, setGRate] = useState("14.75");
   const [greeks, setGreeks] = useState(null);
 
   const activeTicker = customTicker.trim().toUpperCase() || ticker;
@@ -394,7 +397,7 @@ export default function PutAgent() {
   const lastPrice = priceData.at(-1)?.close;
   const firstPrice = priceData[0]?.close;
   const trend = ((lastPrice - firstPrice) / firstPrice) * 100;
-  const volDecimal = calcVolatility(priceData);
+  const volDecimal = calcVolatility(priceData, 21);
   const vol = volDecimal * 100;
   const lastSMA20 = sma20.filter(v => v !== null).at(-1);
   const lastSMA50 = sma50.filter(v => v !== null).at(-1);
@@ -405,7 +408,10 @@ export default function PutAgent() {
     if (!K || !gExpiry || isNaN(K)) return;
     const today = new Date();
     const expiryDate = new Date(gExpiry);
-    const T = Math.max((expiryDate - today) / (365 * 24 * 60 * 60 * 1000), 0.001);
+    const businessDays = businessDaysBetween(today, expiryDate);
+
+    const T = Math.max(businessDays / 252, 0.001);
+
     const daysLeft = Math.max(Math.round((expiryDate - today) / (24 * 60 * 60 * 1000)), 0);
     const bs = blackScholes(lastPrice, K, T, r, volDecimal, gType);
     const marketPrice = parseFloat(mPlace);
@@ -419,6 +425,19 @@ export default function PutAgent() {
 
     setGreeks({ ...bs, percentile, otmPct, K, T, daysLeft, prob, hvPercentil });
   };
+
+  function businessDaysBetween(start, end) {
+    let count = 0;
+    let current = new Date(start);
+
+    while (current <= end) {
+      const day = current.getDay();
+      if (day !== 0 && day !== 6) count++; // exclui domingo(0) e sábado(6)
+      current.setDate(current.getDate() + 1);
+    }
+
+    return count;
+  }
 
   const buildPrompt = ind => `
 Você é um especialista em opções da B3. Analise os dados e dê recomendação objetiva sobre lançamento de PUT.
