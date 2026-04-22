@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import detectSupports from "./detectSupports";
 
 const MOCK_HISTORY = {
   BOVA11: [
