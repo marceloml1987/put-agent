@@ -56,9 +56,9 @@ async function implementaDBSCAN() {
 
     const candles = await resp.json();
     const clusters = procuraSuportes(candles, 0.5);
-    const clustersNormalizados = deduplicarClustersIterativo(clusters, 0.5);
+    //const clustersNormalizados = deduplicarClustersIterativo(clusters, 0.5);
 
-    const clusterMedianasSuporte = criaClusterMedianas(clustersNormalizados);
+    //const clusterMedianasSuporte = criaClusterMedianas(clustersNormalizados);
 
 }
 /**
@@ -68,29 +68,49 @@ async function implementaDBSCAN() {
 
 function procuraSuportes(candles, percentualDistancia) {
 
-    let candlesOrdenados =
-        candles.sort((a, b) => b.high - a.high);
+    let candlesOrdenadosHigh = [...candles]
+        .sort((a, b) => b.high - a.high);
 
-    const clusters = [];
+    let candlesOrdenadosLow = [...candles]
+        .sort((a, b) => b.low - a.low);
 
-    for (let i = 0; i < candlesOrdenados.length; i++) {
+    /*     const zonas = [];
+        for (let s of candlesOrdenadosLow) {
+            for (let r of candlesOrdenadosHigh) {
+    
+                const distancia = Math.abs(s.low - r.high) / s.low;
+    
+                if (distancia < 0.005) { // 0.5%
+                    zonas.push({
+                        preco: (s.low + r.high) / 2,
+                        tipo: "confluencia",
+                        date: s.date
+                    });
+                }
+            }
+        } */
 
-        const high = candlesOrdenados[i].high;
+    //Clusterizando os topos
+    let clustersTopo = [];
+
+    for (let i = 0; i < candlesOrdenadosHigh.length; i++) {
+
+        const high = candlesOrdenadosHigh[i].high;
 
         const min = high * (1 - percentualDistancia / 100);
         const max = high * (1 + percentualDistancia / 100);
 
-        const cluster = [
-            candlesOrdenados[i]
+        const clusterTop = [
+            candlesOrdenadosHigh[i].high
         ];
 
-        for (let j = i + 1; j < candlesOrdenados.length; j++) {
+        for (let j = i + 1; j < candlesOrdenadosHigh.length; j++) {
 
-            const h = candlesOrdenados[j].high;
+            const h = candlesOrdenadosHigh[j].high;
 
             if (h >= min && h <= max) {
 
-                cluster.push(candlesOrdenados[j]);
+                clusterTop.push(h);
 
             } else {
 
@@ -100,12 +120,84 @@ function procuraSuportes(candles, percentualDistancia) {
 
         }
 
-        if (cluster.length > 1) {
-            clusters.push(cluster);
+        if (clusterTop.length > 3) {
+            const medianaClusterHigh = recuperaMedianaClusters(clusterTop);
+
+
+            if (clustersTopo.length > 0) {
+                clustersTopo = comparaMedianaAtualComCluster(clustersTopo, medianaClusterHigh, percentualDistancia);
+            } else {
+                clustersTopo.push(medianaClusterHigh);
+            }
+
         }
 
     }
 
+    //Clusterizando os fundos
+    let clustersFundo = [];
+
+    for (let i = 0; i < candlesOrdenadosLow.length; i++) {
+
+        const low = candlesOrdenadosLow[i].low;
+
+        const min = low * (1 - percentualDistancia / 100);
+        const max = low * (1 + percentualDistancia / 100);
+
+        const clusterFundo = [
+            candlesOrdenadosLow[i].low
+        ];
+
+        for (let j = i + 1; j < candlesOrdenadosLow.length; j++) {
+
+            const l = candlesOrdenadosLow[j].low;
+
+            if (l >= min && l <= max) {
+
+                clusterFundo.push(l);
+
+            } else {
+
+                break;
+
+            }
+
+        }
+
+        if (clusterFundo.length > 3) {
+            const medianaClusterLow = recuperaMedianaClusters(clusterFundo);
+
+
+            if (clustersTopo.length > 0) {
+                clustersFundo = comparaMedianaAtualComCluster(clustersFundo, medianaClusterLow, percentualDistancia);
+            } else {
+                clustersFundo.push(medianaClusterLow);
+            }
+
+        }
+
+    }
+
+    return clustersTopo;
+}
+
+function comparaMedianaAtualComCluster(clusters, medianaCluster, percentualDistancia) {
+
+    const min = medianaCluster * (1 - percentualDistancia / 100);
+    const max = medianaCluster * (1 + percentualDistancia / 100);
+
+    for (let i = 0; i < clusters.length; i++) {
+        let preco = clusters[i];
+
+        if (preco >= min && preco <= max) {
+
+            const mediana = recuperaMedianaClusters([preco, medianaCluster])
+            clusters[i] = mediana;
+            return clusters;
+        }
+
+    }
+    clusters.push(medianaCluster);
     return clusters;
 }
 
