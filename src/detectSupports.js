@@ -12,7 +12,7 @@
  *   node src/detect-supports.js BOVA11 --lookback=90 --max-distance=0.12
  *   node src/detect-supports.js PETR4 --debug
  */
-export default procuraSuportes;
+export default recuperaSuportesResistencias;
 
 /* function getArg(name, defaultVal) {
     const found = args.find(a => a.startsWith(`--${name}=`));
@@ -55,7 +55,8 @@ async function implementaDBSCAN() {
     );
 
     const candles = await resp.json();
-    const clusters = procuraSuportes(candles, 0.5);
+    const clusters = recuperaSuportesResistencias(candles, 0.5);
+    console.log(clusters);
     //const clustersNormalizados = deduplicarClustersIterativo(clusters, 0.5);
 
     //const clusterMedianasSuporte = criaClusterMedianas(clustersNormalizados);
@@ -66,7 +67,9 @@ async function implementaDBSCAN() {
  * Candle e swing low se sua minima for menor que os N candles de cada lado.
  */
 
-function procuraSuportes(candles, percentualDistancia) {
+function recuperaSuportesResistencias(candles, percentualDistancia) {
+
+    const percentualDistanciaDecimal = percentualDistancia / 100;
 
     let candlesOrdenadosHigh = [...candles]
         .sort((a, b) => b.high - a.high);
@@ -108,7 +111,10 @@ function procuraSuportes(candles, percentualDistancia) {
 
             const h = candlesOrdenadosHigh[j].high;
 
-            if (h >= min && h <= max) {
+            const distancia = Math.abs(high - h) / ((high + h) / 2);
+
+            //if (l >= min && l <= max) {
+            if (distancia <= percentualDistanciaDecimal) {
 
                 clusterTop.push(h);
 
@@ -152,7 +158,10 @@ function procuraSuportes(candles, percentualDistancia) {
 
             const l = candlesOrdenadosLow[j].low;
 
-            if (l >= min && l <= max) {
+            const distancia = Math.abs(low - l) / ((low + l) / 2);
+
+            //if (l >= min && l <= max) {
+            if (distancia <= percentualDistanciaDecimal) {
 
                 clusterFundo.push(l);
 
@@ -178,7 +187,10 @@ function procuraSuportes(candles, percentualDistancia) {
 
     }
 
-    return clustersTopo;
+    return {
+        "topos": clustersTopo,
+        "fundos": clustersFundo
+    };
 }
 
 function comparaMedianaAtualComCluster(clusters, medianaCluster, percentualDistancia) {
@@ -304,11 +316,18 @@ function recuperaMedianaClusters(valores) {
 
     if (ordenado.length % 2 === 0) {
         // par → média dos dois do meio
-        return (ordenado[meio - 1] + ordenado[meio]) / 2;
+        return normalizaPrecos((ordenado[meio - 1] + ordenado[meio]) / 2);
     } else {
         // ímpar → valor do meio
-        return ordenado[meio];
+        return normalizaPrecos(ordenado[meio]);
     }
+}
+
+function normalizaPrecos(preco) {
+
+    let precoNormalizado = parseFloat(preco.toFixed(2));
+
+    return precoNormalizado;
 }
 
 /**
