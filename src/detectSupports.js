@@ -77,28 +77,13 @@ function recuperaSuportesResistencias(candles, percentualDistancia) {
     let candlesOrdenadosLow = [...candles]
         .sort((a, b) => b.low - a.low);
 
-    /*     const zonas = [];
-        for (let s of candlesOrdenadosLow) {
-            for (let r of candlesOrdenadosHigh) {
-    
-                const distancia = Math.abs(s.low - r.high) / s.low;
-    
-                if (distancia < 0.005) { // 0.5%
-                    zonas.push({
-                        preco: (s.low + r.high) / 2,
-                        tipo: "confluencia",
-                        date: s.date
-                    });
-                }
-            }
-        } */
-
     //Clusterizando os topos
     let clustersTopo = [];
 
     for (let i = 0; i < candlesOrdenadosHigh.length; i++) {
 
         const high = candlesOrdenadosHigh[i].high;
+        const date_high = candlesOrdenadosHigh[i].date;
 
         const min = high * (1 - percentualDistancia / 100);
         const max = high * (1 + percentualDistancia / 100);
@@ -107,9 +92,12 @@ function recuperaSuportesResistencias(candles, percentualDistancia) {
             candlesOrdenadosHigh[i].high
         ];
 
+        const data_toques_h = new Set();
+        data_toques_h.add(date_high);
         for (let j = i + 1; j < candlesOrdenadosHigh.length; j++) {
 
             const h = candlesOrdenadosHigh[j].high;
+            const date_h = candlesOrdenadosHigh[j].date;
 
             const distancia = Math.abs(high - h) / ((high + h) / 2);
 
@@ -117,6 +105,7 @@ function recuperaSuportesResistencias(candles, percentualDistancia) {
             if (distancia <= percentualDistanciaDecimal) {
 
                 clusterTop.push(h);
+                data_toques_h.add(date_h);
 
             } else {
 
@@ -129,12 +118,11 @@ function recuperaSuportesResistencias(candles, percentualDistancia) {
         if (clusterTop.length > 3) {
             const medianaClusterHigh = recuperaMedianaClusters(clusterTop);
 
-
-            if (clustersTopo.length > 0) {
-                clustersTopo = comparaMedianaAtualComCluster(clustersTopo, medianaClusterHigh, percentualDistancia);
-            } else {
-                clustersTopo.push(medianaClusterHigh);
-            }
+            //console.log(data_toques);
+            clustersTopo = comparaMedianaAtualComCluster(clustersTopo,
+                medianaClusterHigh,
+                data_toques_h,
+                percentualDistancia);
 
         }
 
@@ -146,6 +134,7 @@ function recuperaSuportesResistencias(candles, percentualDistancia) {
     for (let i = 0; i < candlesOrdenadosLow.length; i++) {
 
         const low = candlesOrdenadosLow[i].low;
+        const date_low = candlesOrdenadosLow[i].date;
 
         const min = low * (1 - percentualDistancia / 100);
         const max = low * (1 + percentualDistancia / 100);
@@ -154,11 +143,16 @@ function recuperaSuportesResistencias(candles, percentualDistancia) {
             candlesOrdenadosLow[i].low
         ];
 
+        const data_toques_l = new Set();
+        data_toques_l.add(date_low);
+
         for (let j = i + 1; j < candlesOrdenadosLow.length; j++) {
 
             const l = candlesOrdenadosLow[j].low;
+            const date_l = candlesOrdenadosLow[j].date;
 
             const distancia = Math.abs(low - l) / ((low + l) / 2);
+            data_toques_l.add(date_l);
 
             //if (l >= min && l <= max) {
             if (distancia <= percentualDistanciaDecimal) {
@@ -176,12 +170,10 @@ function recuperaSuportesResistencias(candles, percentualDistancia) {
         if (clusterFundo.length > 3) {
             const medianaClusterLow = recuperaMedianaClusters(clusterFundo);
 
-
-            if (clustersTopo.length > 0) {
-                clustersFundo = comparaMedianaAtualComCluster(clustersFundo, medianaClusterLow, percentualDistancia);
-            } else {
-                clustersFundo.push(medianaClusterLow);
-            }
+            clustersFundo = comparaMedianaAtualComCluster(clustersFundo,
+                medianaClusterLow,
+                data_toques_l,
+                percentualDistancia);
 
         }
 
@@ -193,23 +185,44 @@ function recuperaSuportesResistencias(candles, percentualDistancia) {
     };
 }
 
-function comparaMedianaAtualComCluster(clusters, medianaCluster, percentualDistancia) {
+function comparaMedianaAtualComCluster(clusters, medianaCluster, datasNovas, percentualDistancia) {
 
     const min = medianaCluster * (1 - percentualDistancia / 100);
     const max = medianaCluster * (1 + percentualDistancia / 100);
 
     for (let i = 0; i < clusters.length; i++) {
-        let preco = clusters[i];
+
+        const preco = clusters[i].preco;
 
         if (preco >= min && preco <= max) {
 
-            const mediana = recuperaMedianaClusters([preco, medianaCluster])
-            clusters[i] = mediana;
+            // 🔹 recalcula mediana
+            const novaMediana = recuperaMedianaClusters([
+                preco,
+                medianaCluster
+            ]);
+
+            // 🔹 atualiza cluster existente
+            clusters[i].preco = novaMediana;
+
+            // 🔹 junta datas (evita duplicidade)
+            const datasSet = new Set([
+                ...clusters[i].datas,
+                ...datasNovas
+            ]);
+
+            clusters[i].datas = [...datasSet];
+
             return clusters;
         }
-
     }
-    clusters.push(medianaCluster);
+
+    // 🔹 não achou → cria novo cluster
+    clusters.push({
+        preco: medianaCluster,
+        datas: datasNovas
+    });
+
     return clusters;
 }
 
